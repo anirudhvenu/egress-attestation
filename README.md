@@ -1,4 +1,4 @@
-# Egress Attestation PoC v1
+# Egress Attestation
 
 A signed, outsider-verifiable statement of what a sandbox could reach on the network during a
 guardrails-off eval. The lab runs an eval, captures flow logs at every boundary between the
