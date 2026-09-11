@@ -1,0 +1,22 @@
+{
+  "allowed": [
+    {
+      "dst": "203.0.113.10:443",
+      "expect": {
+        "max_out_bytes": 1000000,
+        "min_in_out_ratio": 50
+      },
+      "label": "pypi"
+    },
+    {
+      "dst": "203.0.113.20:443",
+      "expect": {
+        "max_out_bytes": 1000000,
+        "min_in_out_ratio": 50
+      },
+      "label": "npm"
+    }
+  ],
+  "boundary": "proxy",
+  "monitored_host": "10.0.1.5"
+}

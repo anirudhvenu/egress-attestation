@@ -1,0 +1,35 @@
+{
+  "boundary": "proxy",
+  "monitored_host": "10.0.1.5",
+  "raw_log_sha256": "0e3b7e240a987b0feed95de6a4c8ed531557b9994336c8210c1b298b22c56894",
+  "seen": [
+    {
+      "bytes_in": 18662,
+      "bytes_out": 146125,
+      "connections": 60,
+      "dst": "198.51.100.44:443"
+    },
+    {
+      "bytes_in": 652091,
+      "bytes_out": 1496800,
+      "connections": 400,
+      "dst": "198.51.100.8:443"
+    },
+    {
+      "bytes_in": 38239269,
+      "bytes_out": 267281,
+      "connections": 273,
+      "dst": "203.0.113.10:443"
+    },
+    {
+      "bytes_in": 3983299,
+      "bytes_out": 27493,
+      "connections": 27,
+      "dst": "203.0.113.20:443"
+    }
+  ],
+  "window": {
+    "end": "2026-07-09T05:04:12Z",
+    "start": "2026-07-09T02:28:00Z"
+  }
+}

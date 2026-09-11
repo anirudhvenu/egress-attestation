@@ -1,0 +1,20 @@
+{
+  "files": {
+    "digest_proxy.json": "fd1d7109d7573a02f5e5f45d78aec0ac9715399129d434a698a8413c9435f130",
+    "digest_sandbox.json": "3486ba8702a41404e1742ccb8ae2bd12dd53e79eda2431d451f7d4fe487ad722",
+    "policy_proxy.json": "a8aefbe76ac8aece80b6b56cadb6e0b55808f54374d48641f712bdf8d705c38b",
+    "policy_sandbox.json": "a70f758f241309992c84ab9966dad2d7853becade11d77f0f248c29c882ed8ea"
+  },
+  "nonce": "8ba8496a2525ae171ffd104d632dede6ef418d9b95962a9d88e2fcdbc8d48d24",
+  "proxy": {
+    "image_sha256": "16178aa3ded121e320323862777732fbbc02a91ea2aa00fe979a5aa9586b31e1",
+    "product": "artifactory",
+    "version": "7.98.1"
+  },
+  "run_id": "exploitgym-run-0001",
+  "spec_version": "0.1",
+  "window": {
+    "end": "2026-07-09T05:13:39Z",
+    "start": "2026-07-09T02:28:00Z"
+  }
+}

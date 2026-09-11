@@ -1,0 +1,17 @@
+{
+  "boundary": "sandbox",
+  "monitored_host": "10.0.2.10",
+  "raw_log_sha256": "2e0a280fed167afad2899d70bef72713a36506b198ec8da82ab412c3a89489f6",
+  "seen": [
+    {
+      "bytes_in": 42222568,
+      "bytes_out": 596780,
+      "connections": 300,
+      "dst": "10.0.1.5:443"
+    }
+  ],
+  "window": {
+    "end": "2026-07-09T05:04:12Z",
+    "start": "2026-07-09T02:28:00Z"
+  }
+}

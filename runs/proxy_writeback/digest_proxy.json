@@ -1,0 +1,23 @@
+{
+  "boundary": "proxy",
+  "monitored_host": "10.0.1.5",
+  "raw_log_sha256": "65b96593dd8bf31b2e6d7cba23868e685540113466983c616d6e85a913647200",
+  "seen": [
+    {
+      "bytes_in": 36901851,
+      "bytes_out": 259718,
+      "connections": 260,
+      "dst": "203.0.113.10:443"
+    },
+    {
+      "bytes_in": 5361475,
+      "bytes_out": 40462,
+      "connections": 40,
+      "dst": "203.0.113.20:443"
+    }
+  ],
+  "window": {
+    "end": "2026-07-09T05:12:40Z",
+    "start": "2026-07-09T02:28:00Z"
+  }
+}

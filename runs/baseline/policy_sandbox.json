@@ -1,0 +1,14 @@
+{
+  "allowed": [
+    {
+      "dst": "10.0.1.5:443",
+      "expect": {
+        "max_out_bytes": 2000000,
+        "min_in_out_ratio": 20
+      },
+      "label": "artifactory package proxy"
+    }
+  ],
+  "boundary": "sandbox",
+  "monitored_host": "10.0.2.10"
+}
