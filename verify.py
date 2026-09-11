@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
 """Verify an egress attestation run.
 
-Checks, in this order: manifest signature, file hashes, sandbox boundary, proxy
-boundary. Has no knowledge of which scenario produced the run, and reads only
-manifest.json, manifest.sig and the four files named in manifest.files. It never
-reads flows_*.log.
+Answers one question for an outsider: did this sandbox, and the proxy acting on
+its behalf, talk only to destinations the lab declared in advance?
+
+Flow:
+    1. ed25519-verify manifest.sig over the exact bytes of manifest.json.
+    2. Re-hash every file the manifest names and compare.
+    3. Check each boundary's digest against its policy. Undeclared destinations
+       fail; volume and ratio breaches alert.
+    4. Print the verdict, the offenders, and a one-line status row.
+
+Reads only the manifest, the signature, and the four JSON files the manifest
+names. Never the raw flow logs, and nothing here knows which scenario it is
+looking at, so the verdict comes from the evidence rather than a label.
+
+Exit: 0 pass, 1 failed check, 2 bad signature.
 
 Usage: python verify.py runs/<scenario> [--pubkey keys/lab.pub] [--verbose] [--no-color]
 """
@@ -18,22 +29,34 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
+# An offender line awaiting output: (column 1, column 2, kind, payload).
+# kind "unknown" carries a (connections, bytes_out) payload and renders as an
+# undeclared destination; kind "text" carries a ready-made detail string.
+Offender = tuple[str, str, str, object]
+
 BOUNDARIES = ("sandbox", "proxy")
 GREEN, YELLOW, RED, RESET = "\033[32m", "\033[33m", "\033[31m", "\033[0m"
 STATUS_COLOR = {"ok": GREEN, "alert": YELLOW, "not in policy": RED}
 USE_COLOR = False
 
 
-def paint(text, color):
+def paint(text, color: str) -> str:
+    """Wrap text in an ANSI colour, or return it plain when colour is off."""
     return f"{color}{text}{RESET}" if USE_COLOR else str(text)
 
 
-def mb(n):
+def mb(n: int) -> str:
+    """Format a byte count as decimal megabytes, one decimal place."""
     return f"{n / 1_000_000:.1f}"
 
 
-def render(verdict, offenders, tables, status):
-    """verdict, blank line, offender lines, optional tables, blank line, status row."""
+def render(verdict: str, offenders: list[Offender],
+           tables: list[tuple[str, list]], status: dict) -> None:
+    """Print the report: verdict, offenders, optional tables, status row.
+
+    Columns pad to the widest entry. Colour touches only the verdict, the status
+    words, and `not in policy`. Tables are empty unless --verbose.
+    """
     print()
     print(verdict)
     if offenders:
@@ -69,8 +92,18 @@ def render(verdict, offenders, tables, status):
     print("  " + "    ".join(f"{name} {value}" for name, value in status.items()))
 
 
-def check_boundary(run, boundary, offenders, tables):
-    """Returns 'ok', 'alert' or 'fail' for one boundary; appends offenders/rows."""
+def check_boundary(run: Path, boundary: str, offenders: list[Offender],
+                   tables: list) -> str:
+    """Check one boundary's observed traffic against its policy.
+
+    Every destination in the digest must be declared. A declared destination
+    still alerts if it exceeds max_out_bytes or falls below min_in_out_ratio.
+    Undeclared destinations report first, most connections first; alerts follow.
+
+    Returns "fail" for an undeclared destination or an unreadable file, "alert"
+    for a threshold breach alone, otherwise "ok". Appends to `offenders` and
+    `tables`.
+    """
     try:
         policy = json.loads((run / f"policy_{boundary}.json").read_text())
         digest = json.loads((run / f"digest_{boundary}.json").read_text())
@@ -82,8 +115,6 @@ def check_boundary(run, boundary, offenders, tables):
     allowed = {entry["dst"]: entry for entry in policy.get("allowed", [])}
     seen = digest.get("seen", [])
     verdict, rows = "ok", []
-    # Undeclared destinations are reported loudest-first (most connections), not
-    # in the digest's dst order; alerts follow, in the order they were checked.
     unknown, alerts = [], []
 
     for s in seen:
@@ -122,7 +153,15 @@ def check_boundary(run, boundary, offenders, tables):
     return verdict
 
 
-def main():
+def main() -> int:
+    """Verify one run folder and print the report.
+
+    A bad signature stops everything: if the manifest is not authentic, its
+    contents are not worth reporting on. Any other failure still checks both
+    boundaries, so one bad file hash cannot mask a policy violation elsewhere.
+
+    Returns the exit code: 0 pass, 1 failed check, 2 bad signature.
+    """
     ap = argparse.ArgumentParser(description="Verify an egress attestation run.")
     ap.add_argument("run", help="run folder, e.g. runs/baseline")
     ap.add_argument("--pubkey", default="keys/lab.pub")

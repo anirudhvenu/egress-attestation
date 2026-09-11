@@ -1,9 +1,24 @@
 #!/usr/bin/env python3
-"""Generate signed egress-attestation artifacts for one scenario (see README.md).
+"""Generate signed egress-attestation artifacts for one scenario.
+
+Models a sandbox that reaches the internet only through a package proxy, and
+attests what each hop actually talked to:
+
+    sandbox 10.0.2.10 --> proxy 10.0.1.5:443 --> registries 203.0.113.0/24
+
+Flow:
+    1. Synthesise VPC flow logs at both boundaries. 300 package installs,
+       identical in every scenario.
+    2. Inject the traffic that makes this scenario distinct.
+    3. Write both logs, read them back, reduce each to a per-destination digest.
+    4. Hash the two policies and two digests into a manifest, and sign it.
+
+Digests are built from the written files, so a digest and its raw_log_sha256
+always cover the same bytes. Output is deterministic: one scenario, one set of
+bytes, every time. The scenario name reaches the artifacts only as a random seed
+and a nonce hash, never as plaintext.
 
 Usage: python gen.py --scenario {baseline,sandbox_leak,proxy_escape,proxy_writeback} [--out runs/]
-
-Output is deterministic: the same scenario always produces byte-identical files.
 """
 
 import argparse
@@ -18,20 +33,17 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+# A flow log record awaiting output: (start, direction rank, srcaddr, text).
+# The first three fields are the sort key; only the text is written.
+FlowRecord = tuple[int, int, str, str]
+
 # --- fixed topology ---------------------------------------------------------
 ACCOUNT = "123456789012"
 SANDBOX, PROXY = "10.0.2.10", "10.0.1.5"
 PYPI, NPM = "203.0.113.10", "203.0.113.20"
-# 2026-07-09T02:28:00Z. The spec's parenthetical unix value (1783996080) is
-# 2026-07-14, not 2026-07-09; the ISO date wins, since that is what every
-# schema example in the spec shows and what the artifacts carry.
-WINDOW_START = 1783564080
+WINDOW_START = 1783564080  # 2026-07-09T02:28:00Z
 INSTALLS = 300
-# Download size range per install, log-uniform. A 5 MB upper bound gives a mean
-# of ~1.07 MB and a baseline in/out ratio near 50, high enough that the
-# proxy_writeback ratio alert never fires. 300 KB gives a ~140 KB mean, matching
-# the worked digest example this PoC is built against, and a writeback ratio
-# of ~6 against a floor of 20.
+# Per-install download size, drawn log-uniformly between these bounds (mean ~140 KB).
 DOWN_MIN, DOWN_MAX = 50_000, 300_000
 SCENARIOS = ["baseline", "sandbox_leak", "proxy_escape", "proxy_writeback"]
 ENI = {"sandbox": "eni-sandbox01", "proxy": "eni-proxy01"}
@@ -59,12 +71,12 @@ POLICY = {
 
 
 # --- flow logs --------------------------------------------------------------
-def line(boundary, src, dst, sport, dport, nbytes, start, end):
-    """One AWS VPC Flow Logs v2 record, as (sort key, text).
+def line(boundary: str, src: str, dst: str, sport: int, dport: int,
+         nbytes: int, start: int, end: int) -> FlowRecord:
+    """Build one AWS VPC Flow Logs v2 record, paired with its sort key.
 
-    The sort key carries a direction rank so that a connection's forward line
-    (monitored host -> dst) always precedes its reverse line at the same
-    timestamp, instead of the two landing in srcaddr order.
+    Direction rank is 0 when the monitored host is the source, 1 otherwise,
+    which keeps a connection's two lines adjacent and forward-first.
     """
     packets = max(1, nbytes // 1400)
     rank = 0 if src == HOST[boundary] else 1
@@ -75,15 +87,26 @@ def line(boundary, src, dst, sport, dport, nbytes, start, end):
     return (start, rank, src, text)
 
 
-def connection(flows, boundary, dst, sport, dport, up, down, start, dur):
-    """Forward (monitored host -> dst) and reverse (dst -> monitored host)."""
+def connection(flows: list[FlowRecord], boundary: str, dst: str, sport: int,
+               dport: int, up: int, down: int, start: int, dur: int) -> None:
+    """Append both directions of one TCP connection to `flows`.
+
+    `up` bytes leave the monitored host, `down` come back.
+    """
     host = HOST[boundary]
     flows.append(line(boundary, host, dst, sport, dport, up, start, start + dur))
     flows.append(line(boundary, dst, host, dport, sport, down, start, start + dur))
 
 
-def base_traffic(sandbox, proxy):
-    """300 package installs, identical recipe for every scenario."""
+def base_traffic(sandbox: list[FlowRecord], proxy: list[FlowRecord]) -> int:
+    """Generate the 300 package installs common to every scenario.
+
+    Each install pairs a sandbox-to-proxy connection with the proxy-to-registry
+    fetch it causes, sharing a start time and duration. Registries split 85/15
+    between pypi and npm.
+
+    Returns the last install's start time, which bounds the traffic window.
+    """
     t = WINDOW_START
     for _ in range(INSTALLS):
         t += random.randint(5, 60)
@@ -99,13 +122,25 @@ def base_traffic(sandbox, proxy):
     return t
 
 
-def spread(n, span):
-    """n timestamps evenly spread across the base-traffic window."""
+def spread(n: int, span: int) -> list[int]:
+    """Return n start times spaced evenly across a window of `span` seconds.
+
+    Ascending, and never coinciding with the window edges.
+    """
     return [WINDOW_START + (span * (i + 1)) // (n + 1) for i in range(n)]
 
 
-def inject(scenario, sandbox, proxy, span):
+def inject(scenario: str, sandbox: list[FlowRecord], proxy: list[FlowRecord],
+           span: int) -> None:
+    """Add the traffic that distinguishes this scenario from the baseline.
+
+    baseline:        nothing.
+    sandbox_leak:    SSH to an undeclared internal host.
+    proxy_escape:    proxy traffic to two undeclared external services.
+    proxy_writeback: bulk uploads to the declared proxy, inverting its shape.
+    """
     def burst(flows, boundary, dst, dport, n, up_fn, down_fn):
+        """Add n connections to one destination, spread across the window."""
         for start in spread(n, span):
             sport = random.randint(32768, 60999)
             connection(flows, boundary, dst, sport, dport, up_fn(), down_fn(), start, 1)
@@ -123,19 +158,27 @@ def inject(scenario, sandbox, proxy, span):
               lambda: 200 + random.randint(-50, 50))
 
 
-def write_log(path, flows):
-    """Sorted by start, then forward before reverse, then srcaddr."""
+def write_log(path: Path, flows: list[FlowRecord]) -> None:
+    """Write flow records sorted by start, forward before reverse, then srcaddr."""
     flows.sort(key=lambda f: (f[0], f[1], f[2]))
     path.write_text("\n".join(f[3] for f in flows) + "\n")
 
 
 # --- digests, manifest, signing ---------------------------------------------
-def iso(ts):
+def iso(ts: int) -> str:
+    """Format a unix timestamp as a UTC ISO 8601 string, e.g. 2026-07-09T02:28:00Z."""
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_digest(path, boundary):
-    """Read the written log back and summarise it. Never uses in-memory flows."""
+def build_digest(path: Path, boundary: str) -> tuple[dict, int]:
+    """Reduce a written flow log to a per-destination digest.
+
+    Reads the file from disk, so the digest and its raw_log_sha256 cover the same
+    bytes. Lines from the monitored host give connections and bytes_out keyed by
+    destination; lines back to it give bytes_in.
+
+    Returns the digest and the log's latest flow end.
+    """
     raw = path.read_bytes()
     host = HOST[boundary]
     conns, out, inn = {}, {}, {}
@@ -167,19 +210,19 @@ def build_digest(path, boundary):
     return digest, end
 
 
-def write_json(path, obj):
+def write_json(path: Path, obj: dict) -> None:
+    """Write JSON with sorted keys and fixed indent, so the bytes are hashable."""
     with path.open("w", newline="\n") as f:
         json.dump(obj, f, indent=2, sort_keys=True)
         f.write("\n")
 
 
-def load_key(keys_dir):
-    """Load the demo signing key, generating it once if keys/ is absent.
+def load_key(keys_dir: Path) -> ed25519.Ed25519PrivateKey:
+    """Load the ed25519 signing key, creating the keypair on first use.
 
-    WARNING: keys/lab.key is a throwaway demo key that is deliberately committed
-    to git so anyone can reproduce these artifacts. It signs nothing real. Never
-    reuse it, and never commit a key you care about. Existing keys are never
-    regenerated -- that would invalidate every committed manifest.sig.
+    keys/lab.key is a throwaway demo key, committed with the artifacts so anyone
+    can reproduce the signatures. It protects nothing. An existing key is always
+    reused, since replacing it would invalidate every committed manifest.sig.
     """
     priv_path, pub_path = keys_dir / "lab.key", keys_dir / "lab.pub"
     if not keys_dir.exists():
@@ -202,11 +245,17 @@ def load_key(keys_dir):
     return serialization.load_pem_private_key(priv_path.read_bytes(), password=None)
 
 
-def sha256_file(path):
+def sha256_file(path: Path) -> str:
+    """Return the SHA-256 of a file's contents as a hex string."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def main():
+def main() -> None:
+    """Write one scenario's run folder.
+
+    Two flow logs, two policies, two digests, a manifest, and a detached
+    signature over the manifest bytes.
+    """
     ap = argparse.ArgumentParser(description="Generate egress attestation artifacts.")
     ap.add_argument("--scenario", required=True, choices=SCENARIOS)
     ap.add_argument("--out", default="runs/")
