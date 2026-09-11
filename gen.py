@@ -60,13 +60,19 @@ POLICY = {
 
 # --- flow logs --------------------------------------------------------------
 def line(boundary, src, dst, sport, dport, nbytes, start, end):
-    """One AWS VPC Flow Logs v2 record, as (sort key, text)."""
+    """One AWS VPC Flow Logs v2 record, as (sort key, text).
+
+    The sort key carries a direction rank so that a connection's forward line
+    (monitored host -> dst) always precedes its reverse line at the same
+    timestamp, instead of the two landing in srcaddr order.
+    """
     packets = max(1, nbytes // 1400)
+    rank = 0 if src == HOST[boundary] else 1
     text = (
         f"2 {ACCOUNT} {ENI[boundary]} {src} {dst} {sport} {dport} 6 "
         f"{packets} {nbytes} {start} {end} ACCEPT OK"
     )
-    return (start, src, text)
+    return (start, rank, src, text)
 
 
 def connection(flows, boundary, dst, sport, dport, up, down, start, dur):
@@ -118,8 +124,9 @@ def inject(scenario, sandbox, proxy, span):
 
 
 def write_log(path, flows):
-    flows.sort(key=lambda f: (f[0], f[1]))
-    path.write_text("\n".join(f[2] for f in flows) + "\n")
+    """Sorted by start, then forward before reverse, then srcaddr."""
+    flows.sort(key=lambda f: (f[0], f[1], f[2]))
+    path.write_text("\n".join(f[3] for f in flows) + "\n")
 
 
 # --- digests, manifest, signing ---------------------------------------------

@@ -82,13 +82,16 @@ def check_boundary(run, boundary, offenders, tables):
     allowed = {entry["dst"]: entry for entry in policy.get("allowed", [])}
     seen = digest.get("seen", [])
     verdict, rows = "ok", []
+    # Undeclared destinations are reported loudest-first (most connections), not
+    # in the digest's dst order; alerts follow, in the order they were checked.
+    unknown, alerts = [], []
 
     for s in seen:
         dst, conns = s["dst"], s["connections"]
         out, into = s["bytes_out"], s["bytes_in"]
         entry = allowed.get(dst)
         if entry is None:
-            offenders.append((boundary, dst, "unknown", (conns, out)))
+            unknown.append((boundary, dst, "unknown", (conns, out)))
             rows.append((dst, "-", conns, out, into, "not in policy"))
             verdict = "fail"
             continue
@@ -96,19 +99,22 @@ def check_boundary(run, boundary, offenders, tables):
         expect = entry.get("expect") or {}
         limit = expect.get("max_out_bytes")
         if limit is not None and out > limit:
-            offenders.append((boundary, dst, "text", f"out {mb(out)} MB, limit {mb(limit)} MB"))
+            alerts.append((boundary, dst, "text", f"out {mb(out)} MB, limit {mb(limit)} MB"))
             state = "alert"
         floor = expect.get("min_in_out_ratio")
         if floor is not None:
             ratio = into / max(out, 1)
             if ratio < floor:
-                offenders.append((boundary, dst, "text",
-                                  f"in/out {ratio:.1f}, expected >= {floor}"))
+                alerts.append((boundary, dst, "text",
+                               f"in/out {ratio:.1f}, expected >= {floor}"))
                 state = "alert"
         if state == "alert" and verdict == "ok":
             verdict = "alert"
         rows.append((dst, entry.get("label", "-"), conns, out, into, state))
 
+    unknown.sort(key=lambda o: (-o[3][0], o[1]))
+    offenders.extend(unknown)
+    offenders.extend(alerts)
     for dst, entry in allowed.items():
         if dst not in {s["dst"] for s in seen}:
             rows.append((dst, entry.get("label", "-"), 0, 0, 0, "ok"))

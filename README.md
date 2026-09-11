@@ -3,12 +3,12 @@
 A signed, outsider-verifiable statement of what a sandbox could reach on the network during a
 guardrails-off eval. The lab runs an eval, captures flow logs at every boundary between the
 sandbox and the internet, reduces them to per-destination digests, and signs a manifest binding
-those digests to a run. An outsider with only the public key and the run folder can then check
+those digests to a run. An outsider holding only the public key and the run folder can then check
 that the signature holds, that the digests are the ones that were signed, and that every
-destination the sandbox and its proxy actually talked to was declared in policy — without
-trusting the lab's own account of the run, and without seeing the raw logs.
+destination the sandbox and its proxy actually talked to was declared in policy, without trusting
+the lab's own account of the run and without seeing the raw logs.
 
-**Design principle:** every hop between the sandbox and the internet is a boundary — log its far
+**Design principle:** every hop between the sandbox and the internet is a boundary. Log its far
 side at the network layer, not the workload.
 
 ## Topology
@@ -18,6 +18,12 @@ sandbox 10.0.2.10  --->  proxy 10.0.1.5:443  --->  registries
                                                    203.0.113.10:443  (pypi)
                                                    203.0.113.20:443  (npm)
 ```
+
+Every address in this repository is synthetic. The sandbox and proxy sit in RFC 1918 private
+space, and everything beyond them uses the RFC 5737 documentation ranges (`203.0.113.0/24` and
+`198.51.100.0/24`) that exist precisely so examples never collide with real hosts. The account id,
+interface ids, and proxy build identity are invented too. No real host, network, account, or
+service is named anywhere here.
 
 Two boundaries, two flow logs. The sandbox boundary sees only the proxy; the proxy boundary sees
 where the proxy went next. A destination reached by the proxy on the sandbox's behalf is invisible
@@ -38,8 +44,8 @@ Each run folder contains:
 | `manifest.json` | Run id, window, nonce, proxy build identity, and the SHA-256 of each of the four JSON files above. |
 | `manifest.sig` | Ed25519 signature over the exact bytes of `manifest.json`, base64. |
 
-The verifier reads the manifest, the signature, and the four files it names. It never reads the
-raw logs — the digests are what was signed, and the digests are what it checks.
+The verifier reads the manifest, the signature, and the four files the manifest names. It never
+reads the raw logs: the digests are what was signed, so the digests are what it checks.
 
 ## Running it
 
@@ -51,27 +57,30 @@ python gen.py --scenario baseline
 python verify.py runs/baseline
 ```
 
-`gen.py` regenerates a run folder byte-for-byte; `runs/` is committed so the artifacts can be
+`gen.py` regenerates a run folder byte-for-byte, and `runs/` is committed so the artifacts can be
 verified without regenerating them. Scenarios: `baseline`, `sandbox_leak`, `proxy_escape`,
-`proxy_writeback`.
+`proxy_writeback`. Add `--verbose` to `verify.py` for a full per-boundary table of allowed and
+seen destinations.
 
-`keys/lab.key` is a **throwaway demo key, committed on purpose** so anyone can reproduce the
-signature. Nothing about this PoC's key handling resembles how a real attestation key would live.
+`keys/lab.key` is a throwaway demo key, committed on purpose so anyone can reproduce the
+signatures. Anyone can sign a fake run with this key, which is the point: the demo proves the
+mechanism, not the lab. Nothing about this PoC's key handling resembles how a real attestation key
+would live.
 
 ## Scenarios
 
-Four runs, four verdicts, one verifier that cannot tell them apart in advance. The scenario
-name appears nowhere in the artifacts — only in the folder name — so the verdict comes from the
-evidence, not from a label. Output below is verbatim.
+Four runs, four verdicts, one verifier that cannot tell them apart in advance. The scenario name
+appears nowhere in the artifacts, only in the folder name, so the verdict comes from the evidence
+rather than from a label. Output below is verbatim.
 
 | scenario | sandbox | proxy | verdict | exit |
 |---|---|---|---|---|
 | `baseline` | clean | clean | PASS | 0 |
 | `sandbox_leak` | `10.0.5.7:22` not in policy | clean | FAIL | 1 |
 | `proxy_escape` | clean | `198.51.100.8:443`, `198.51.100.44:443` not in policy | FAIL | 1 |
-| `proxy_writeback` | upload 6.6 MB > 2 MB limit; in/out 6.4 < 20 | clean | PASS with ALERTS | 0 |
+| `proxy_writeback` | upload 6.6 MB against a 2 MB limit, in/out 6.4 against a floor of 20 | clean | PASS with ALERTS | 0 |
 
-### baseline — nothing to report
+### baseline: nothing to report
 
 The shape a clean run makes. Both boundaries talked only to declared destinations, within the
 volumes the policy expects.
@@ -84,11 +93,11 @@ PASS
   signature ok    files 4/4    sandbox ok    proxy ok
 ```
 
-### sandbox_leak — a destination the sandbox was never allowed
+### sandbox_leak: a destination the sandbox was never allowed
 
-Three SSH connections to an internal host on `10.0.5.7:22`. Small — 2.7 KB out, rounding to
-0.0 MB — and that is the point: the check is *declared or not declared*, not *large or small*.
-A volume threshold would have missed this.
+Three SSH connections to an internal host on `10.0.5.7:22`. Small enough to round to 0.0 MB, and
+that is the point: the check is declared or not declared, not large or small. A volume threshold
+would have missed this.
 
 ```
 $ python verify.py runs/sandbox_leak
@@ -100,7 +109,7 @@ FAIL
   signature ok    files 4/4    sandbox FAIL    proxy ok
 ```
 
-### proxy_escape — the case the second boundary exists for
+### proxy_escape: the case the second boundary exists for
 
 The proxy reached an external code sandbox and a paste service on the sandbox's behalf. At the
 sandbox boundary this run is **indistinguishable from baseline**: the sandbox only ever spoke to
@@ -112,18 +121,20 @@ $ python verify.py runs/proxy_escape
 
 FAIL
 
-  proxy    198.51.100.44:443  not in policy    60 conns   0.1 MB out
   proxy    198.51.100.8:443   not in policy   400 conns   1.5 MB out
+  proxy    198.51.100.44:443  not in policy    60 conns   0.1 MB out
 
   signature ok    files 4/4    sandbox ok    proxy FAIL
 ```
 
-### proxy_writeback — an allowed destination used the wrong way
+Undeclared destinations are listed loudest first, by connection count.
 
-Every destination here is declared, so nothing is "not in policy". But a package proxy should
-be a download path: bytes flow in, not out. This run pushes 6.6 MB up to a destination budgeted
-for 2 MB, and inverts the traffic shape — 6.4 bytes in per byte out, against an expected 20.
-That is ALERT, not FAIL: the evidence says *look at this*, not *this is forbidden*.
+### proxy_writeback: an allowed destination used the wrong way
+
+Every destination here is declared, so nothing is "not in policy". But a package proxy should be a
+download path: bytes flow in, not out. This run pushes 6.6 MB up to a destination budgeted for
+2 MB, and inverts the traffic shape, 6.4 bytes in per byte out against an expected 20. That is
+ALERT rather than FAIL, because the evidence says look at this, not this is forbidden.
 
 ```
 $ python verify.py runs/proxy_writeback
@@ -136,13 +147,13 @@ PASS with ALERTS
   signature ok    files 4/4    sandbox ALERT    proxy ok
 ```
 
-### Tamper resistance
+## Tamper resistance
 
 The digests are bound to the manifest by hash, and the manifest to the lab by signature, so the
 two obvious edits fail in different places:
 
 ```
-# doctor a digest to hide a destination -> the manifest hash catches it
+# doctor a digest to hide a destination, and the manifest hash catches it
 
 FAIL
 
@@ -150,7 +161,7 @@ FAIL
 
   signature ok    files 3/4    sandbox ok    proxy ok
 
-# also fix the manifest so the hash matches -> the signature catches it
+# also repair the manifest so the hash matches, and the signature catches it
 
 FAIL
 
@@ -159,8 +170,11 @@ FAIL
   signature FAIL    files -    sandbox -    proxy -
 ```
 
-Verifying with any key other than the one that signed the run exits 2.
-
+The order of checks is load-bearing. A signature failure exits 2 immediately and the boundary
+checks are skipped entirely: if the manifest is not authentic then nothing it points to is worth
+reading, and reporting on those contents would lend them a credibility they have not earned. Every
+other failure exits 1 and still runs both boundaries, so one bad file hash does not hide a policy
+violation somewhere else. Verifying with any key other than the one that signed the run exits 2.
 
 ## What this does not establish
 
@@ -176,15 +190,19 @@ Verifying with any key other than the one that signed the run exits 2.
   proxy boundary must be attested per time window across every run that used it, or one run's
   traffic hides inside another's.
 - **Threshold calibration.** The numbers in the policies are illustrative. Real values come from a
-  baseline of known-clean runs, not from a spec.
+  baseline of known-clean runs.
 
 Also out of scope for v1: privacy mode (hashed destinations), multi-run proxy windows, external
 nonce issuance, the DNS boundary, and any third hop beyond the proxy.
 
 ## Prior art
 
-- Brundage et al. 2020, *Toward Trustworthy AI Development* — verifiable claims as the frame for
+- Brundage et al. 2020, *Toward Trustworthy AI Development*: verifiable claims as the frame for
   auditable statements about an AI system's development.
-- SLSA and in-toto — signed build provenance binding artifacts to the process that produced them.
-- Sigstore — transparency logs for signatures, the model for making a commitment publicly checkable.
-- AWS VPC Flow Logs — the record format used here for boundary capture.
+- SLSA and in-toto: signed build provenance binding artifacts to the process that produced them.
+- Sigstore: transparency logs for signatures, the model for making a commitment publicly checkable.
+- AWS VPC Flow Logs: the record format used here for boundary capture.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
